@@ -41,6 +41,7 @@
 #include "editor/gui/editor_file_dialog.h"
 #include "editor/themes/editor_scale.h"
 #include "main/main.h"
+#include "scene/3d/light_3d.h"
 #include "scene/gui/line_edit.h"
 
 #ifdef WINDOWS_ENABLED
@@ -146,6 +147,9 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 	parameters_map["export_keep_originals"] = unpack_original_images;
 	parameters_map["export_format"] = "GLTF_SEPARATE";
 	parameters_map["export_yup"] = true;
+
+	// NOTE: These raw values are in Blender's Watts, which are further converted to lumens and lux at the end of this function.
+	parameters_map["export_import_convert_lighting_mode"] = "RAW";
 
 	if (p_options.has(SNAME("blender/nodes/custom_properties")) && p_options[SNAME("blender/nodes/custom_properties")]) {
 		parameters_map["export_extras"] = true;
@@ -325,12 +329,49 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 	}
 	ERR_FAIL_COND_V(!p_options.has("animation/fps"), nullptr);
 
+	Node *scene;
 #ifndef DISABLE_DEPRECATED
 	bool trimming = p_options.has("animation/trimming") ? (bool)p_options["animation/trimming"] : false;
-	return gltf->generate_scene(state, (float)p_options["animation/fps"], trimming, false);
+	scene = gltf->generate_scene(state, (float)p_options["animation/fps"], trimming, false);
 #else
-	return gltf->generate_scene(state, (float)p_options["animation/fps"], (bool)p_options["animation/trimming"], false);
+	scene = gltf->generate_scene(state, (float)p_options["animation/fps"], (bool)p_options["animation/trimming"], false);
 #endif
+
+	// The lighting intensities were imported using the Raw settings, which means that they need to be converted from Blender's watts to Godot's lumens.
+	TypedArray<Light3D> light_nodes = scene->find_children("*", "Light3D");
+	for (int i = 0; i < light_nodes.size(); i++) {
+		Light3D *light = cast_to<Light3D>(light_nodes[i]);
+		real_t power_watts = light->get_param(Light3D::PARAM_ENERGY);
+		// Blender has functionality for creating realistic lights by using IES profiles, which provide their brightness in candelas.
+		// Here we do the reverse of what Blender does for the candela-to-watt conversion to do a watt-to-candela conversion.
+		// Blender's candela-to-watt factor: https://github.com/blender/blender/blob/f3399a41e231dfeb5e0894b9d041588b6c92dc5c/intern/cycles/util/ies.cpp#L180C13-L180C28
+		real_t intensity_candelas = power_watts / 0.0706650768394;
+		real_t energy;
+		if (cast_to<DirectionalLight3D>(light)) {
+			// TODO: Figure out what this should be by comparison? The dimensional analysis theory breaks down a little here.
+			real_t illuminance_lux = intensity_candelas; // Dunno!
+			// The default illuminance of the light is 100000 lx, and "energy" is a multiplier for it, so set energy to the desired lux divided by 100000.
+			energy = illuminance_lux / 100000.0;
+		} else {
+			real_t steradians = 0.0;
+			if (cast_to<OmniLight3D>(light)) {
+				// The solid angle of an entire sphere.
+				steradians = 4.0 * Math::PI;
+			} else if (SpotLight3D *spot = cast_to<SpotLight3D>(light)) {
+				real_t theta = Math::deg_to_rad(spot->get_param(SpotLight3D::PARAM_SPOT_ANGLE));
+				// Convert the spot light angle to steradians, based on Wikipedia: https://en.wikipedia.org/wiki/Steradian#Other_properties
+				// "The solid angle of a spherical cone whose cross-section subtends the angle 2*theta is:"
+				real_t sin_half_theta = Math::sin(theta / 2.0);
+				steradians = 4.0 * Math::PI * sin_half_theta * sin_half_theta;
+			}
+			real_t luminous_flux_lumens = intensity_candelas * steradians;
+			// The default luminous flux of the light is 1000 lm, and "energy" is a multiplier for it, so set energy to the desired lumens divided by 1000.
+			energy = luminous_flux_lumens / 1000.0;
+		}
+		light->set_param(Light3D::PARAM_ENERGY, energy);
+	}
+
+	return scene;
 }
 
 Variant EditorSceneFormatImporterBlend::get_option_visibility(const String &p_path, const String &p_scene_import_type, const String &p_option,
