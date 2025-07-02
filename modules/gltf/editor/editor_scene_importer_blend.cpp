@@ -338,45 +338,49 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 #endif
 
 	// The lighting intensities were imported using the Raw settings, which means that they need to be converted from Blender's watts to Godot's lumens.
+	// Dimensional analysis ahead.
 	TypedArray<Light3D> light_nodes = scene->find_children("*", "Light3D");
 	for (int i = 0; i < light_nodes.size(); i++) {
 		Light3D *light = cast_to<Light3D>(light_nodes[i]);
 		// Blender has functionality for creating realistic lights by using IES profiles, which provide their brightness in candelas.
 		// Here we do the reverse of what Blender does for the candela-to-watt conversion to do a watt-to-candela conversion.
-		// Blender's candela-to-watt factor: https://github.com/blender/blender/blob/f3399a41e231dfeb5e0894b9d041588b6c92dc5c/intern/cycles/util/ies.cpp#L180C13-L180C28
-		// For the watt-to-candela factor, we use its inverse:
-		real_t watt_to_candela_factor = 1.0 / 0.0706650768394;
+		// Blender's watts per candela factor: https://github.com/blender/blender/blob/f3399a41e231dfeb5e0894b9d041588b6c92dc5c/intern/cycles/util/ies.cpp#L180C13-L180C28
+		// This value is used as the source of truth, the rest of this is just using it to turn watts to lumens.
+		real_t blender_candela_to_watt_factor = 0.0706650768394;
+		// The W/cd factor consists of the following factors: `1 / 177.83 lm/W * (4*PI) sr` which is just `4*PI W / 177.83 cd`.
+		// If we divide out the `(4*PI) sr` factor, we get a W/lm factor: `1 / 177.83 lm/W`, that is, `1 W / 177.83 lm`.
+		// Finally, we can take the inverse of that to get the luminous efficacy of `177.83 lm / 1 W`.
+		// We could just use 177.83 here directly, but this way there's only one number that needs to be in sync with Blender.
+		real_t blender_luminous_efficacy = 1.0 / (blender_candela_to_watt_factor / (4.0 * Math::PI));
 		real_t energy;
 		if (cast_to<DirectionalLight3D>(light)) {
-			// This is the light's intensity in Blender's units for sun lights: watts/m^2.
-			real_t luminance_watts_per_sqm = light->get_param(Light3D::PARAM_ENERGY);
-			real_t luminance_candelas_per_sqm = luminance_watts_per_sqm * watt_to_candela_factor;
-			// This branch is a little hacky: IES profiles are very specifically intended for real lighting sources, which have a specific solid angle, which
-			// can be used to convert from luminous intensity to luminous flux (or as the case would be for directional lights, from luminance to illuminance).
-			// But since Blender's candela-to-watt factor involves a constant factor of 4*PI for converting W/sr to W, maybe that works for lm/sr to lm here?
-			// If Blender's renderer deals in flux (W, lm) instead of intensity (W/sr, cd), I'd expect this to work, since we're.
-			real_t hacky_candela_to_lumen_factor = 4.0 * Math::PI;
-			real_t illuminance_lux = luminance_candelas_per_sqm * hacky_candela_to_lumen_factor;
+			// Unit: `W/m^2`. This is the light's intensity in Blender's units for sun lights.
+			real_t radiance = light->get_param(Light3D::PARAM_ENERGY);
+			// Unit: `lx = lm/m^2 = W/m^2 * lm/W`. Convert from radiance to illuminance (Blender's radiometric units to Godot's photometric units).
+			real_t illuminance = radiance * blender_luminous_efficacy;
 			// The default illuminance of the light is 100000 lx, and "energy" is a multiplier for it, so set energy to the desired lux divided by 100000.
-			energy = illuminance_lux / 100000.0;
+			energy = illuminance / 100000.0;
 		} else {
-			// This is the light's intensity in Blender's units for point, spot, and area lights: watts.
-			real_t intensity_watts = light->get_param(Light3D::PARAM_ENERGY);
-			real_t intensity_candelas = intensity_watts * watt_to_candela_factor;
-			real_t emission_solid_angle_steradians = 0.0;
+			// Unit: `W`. This is the light's intensity in Blender's units for point, spot, and area lights.
+			real_t radiant_intensity = light->get_param(Light3D::PARAM_ENERGY);
+			// Unit: `cd`. Undo Blender's candelas-to-watts conversion.
+			real_t luminous_intensity = radiant_intensity / blender_candela_to_watt_factor;
+			// Unit: `sr`. Calculate the solid angle of the light.
+			real_t emission_solid_angle = 0.0;
 			if (cast_to<OmniLight3D>(light)) {
 				// The solid angle of an entire sphere.
-				emission_solid_angle_steradians = 4.0 * Math::PI;
+				emission_solid_angle = 4.0 * Math::PI;
 			} else if (SpotLight3D *spot = cast_to<SpotLight3D>(light)) {
 				real_t theta = Math::deg_to_rad(spot->get_param(SpotLight3D::PARAM_SPOT_ANGLE));
 				// Convert the spot light angle to steradians, based on Wikipedia: https://en.wikipedia.org/wiki/Steradian#Other_properties
 				// "The solid angle of a spherical cone whose cross-section subtends the angle 2*theta is:"
 				real_t sin_half_theta = Math::sin(theta / 2.0);
-				emission_solid_angle_steradians = 4.0 * Math::PI * sin_half_theta * sin_half_theta;
+				emission_solid_angle = 4.0 * Math::PI * sin_half_theta * sin_half_theta;
 			}
-			real_t luminous_flux_lumens = intensity_candelas * emission_solid_angle_steradians;
+			// Unit: `lm = cd * sr`. Calculate the total (perceived) light power based on the per-steradian intensity and the solid angle we calculated.
+			real_t luminous_flux = luminous_intensity * emission_solid_angle;
 			// The default luminous flux of the light is 1000 lm, and "energy" is a multiplier for it, so set energy to the desired lumens divided by 1000.
-			energy = luminous_flux_lumens / 1000.0;
+			energy = luminous_flux / 1000.0;
 		}
 		light->set_param(Light3D::PARAM_ENERGY, energy);
 	}
