@@ -148,7 +148,9 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 	parameters_map["export_format"] = "GLTF_SEPARATE";
 	parameters_map["export_yup"] = true;
 
-	// NOTE: These raw values are in Blender's Watts, which are further converted to lumens and lux at the end of this function.
+	// NOTE: These raw values are in Blender's watts, which are further converted to lumens and lux at the end of this function.
+	// When the glTF import process is updated to match the spec, and Blender's "SPEC" lighting mode values match that, this parameter
+	// (and the conversion process at the end of this function) can be omitted, as then the default export setting will result in correct values.
 	parameters_map["export_import_convert_lighting_mode"] = "RAW";
 
 	if (p_options.has(SNAME("blender/nodes/custom_properties")) && p_options[SNAME("blender/nodes/custom_properties")]) {
@@ -337,47 +339,50 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 	scene = gltf->generate_scene(state, (float)p_options["animation/fps"], (bool)p_options["animation/trimming"], false);
 #endif
 
-	// The lighting intensities were imported using the Raw settings, which means that they need to be converted from Blender's watts to Godot's lumens.
+	// The lighting intensities were imported using the "RAW" lighting mode, which means that they need to be converted from Blender's watts to Godot's lumens.
 	// Dimensional analysis ahead.
 	TypedArray<Light3D> light_nodes = scene->find_children("*", "Light3D");
 	for (int i = 0; i < light_nodes.size(); i++) {
-		Light3D *light = cast_to<Light3D>(light_nodes[i]);
 		// Blender has functionality for creating realistic lights by using IES profiles, which provide their intensity in candelas.
-		// Here we do the reverse of what Blender does for the candela-to-watt conversion to do a watt-to-candela conversion.
 		// Blender's watts per candela factor: https://github.com/blender/blender/blob/f3399a41e231dfeb5e0894b9d041588b6c92dc5c/intern/cycles/util/ies.cpp#L180C13-L180C28
-		real_t blender_candela_to_watt_factor = 0.0706650768394;
-		// The candela-to-watt factor is, among other factors, based on a luminous efficacy value of 177.83 lm/W. Since candelas don't make much sense for
-		// directional lights, this is used instead. But keep in mind that this is on less solid ground than the candela-to-watt factor, since that one is
-		// a definitive ratio between two very real quantities, Blender's watts, and IES profiles' candelas.
+		// From the comment, we get the following formula for calculating said factor: `4 * PI sr / 177.83 lm/W`, or: `(4 * PI / 177.83) W/cd`.
+		//
+		// |   Light type    | Blender units | Godot units |
+		// |-----------------|---------------|-------------|
+		// | Omni/point      | Watts         | Lumens      |
+		// | Spot            | Watts*        | Lumens*     |
+		// | Directional/sun | Watts/m^2     | Lumens/m^2  |
+		//
+		// * Notably, *both* Blender and Godot treat the spotlight watts / lumens as if it were W/sr or candelas: the watts / lumens represent
+		//   "how much power the light would emit *if it emitted it in all directions*," and the light that would fall outside of the cone disappears.
+		//   This is artistically nicer to use, and also makes this conversion process simpler, but is a bit odd in terms of the meanings of the units.
+		//
+		// As can be seen on the table, Blender and Godot use the same units for everything, except that where Blender uses watts, Godot uses lumens.
+		// Thankfully, the "canonical watts per candela factor" seen in Blender's IES parsing code (which you'd hope was right, since the whole point is
+		// to get realistic lights, and the candelas there are definitely realistic values) contains within it a factor for *luminous efficacy.*
+		// It's the `177.83 lm/W`, and multiplying any of the three possible units that Blender lights have, will result in the appropriate Godot unit.
+		// For example, for a sun light `N W/m^2`, the relevant Godot value is `N W/m^2 * 177.83 lm/W = N * 177.83 lm/m^2 = N * 177.83 lx`.
+		// That said, IES profiles are only relevant to spot lights as far as I know, which means that the conversion for omni and directional lights
+		// relies on the assumption that the units are consistent between the light types in Blender. Which I hope they are.
+		// Thus we arrive at our key conversion constant that we can use to turn Blender light values to Godot light values:
 		real_t blender_luminous_efficacy = 177.83;
+		Light3D *light = cast_to<Light3D>(light_nodes[i]);
 		real_t energy;
 		if (cast_to<DirectionalLight3D>(light)) {
 			// Unit: `W/m^2`. This is the light's intensity in Blender's units for sun lights.
 			real_t irradiance = light->get_param(Light3D::PARAM_ENERGY);
-			// Unit: `lx = lm/m^2 = W/m^2 * lm/W`. Convert from radiance to illuminance (Blender's radiometric units to Godot's photometric units).
+			// Unit: `lx = lm/m^2 = W/m^2 * lm/W`. Convert from Blender's radiometric units to Godot's photometric units.
 			real_t illuminance = irradiance * blender_luminous_efficacy;
-			// The default illuminance of the light is 100000 lx, and "energy" is a multiplier for it, so set energy to the desired lux divided by 100000.
+			// The default illuminance of the light is `100000 lx`.
+			// The energy parameter is a multiplier for it, so we set it to the desired lux divided by `100000 lx`.
 			energy = illuminance / 100000.0;
-		} else {
-			// Unit: `W`. This is the light's intensity in Blender's units for point, spot, and area lights.
+		} else { // This branch handles OmniLight3D and SpotLight3D correctly, any possible additional light types might get correct-ish values by luck.
+			// Unit: `W`. This is the light's intensity in Blender's units for point and spot lights.
 			real_t radiant_flux = light->get_param(Light3D::PARAM_ENERGY);
-			// Unit: `cd = W / (W/cd)`. Undo Blender's candelas-to-watts conversion.
-			real_t luminous_intensity = radiant_flux / blender_candela_to_watt_factor;
-			// Unit: `sr`. Calculate the solid angle of the light.
-			real_t emission_solid_angle = 0.0;
-			if (cast_to<OmniLight3D>(light)) {
-				// The solid angle of an entire sphere.
-				emission_solid_angle = 4.0 * Math::PI;
-			} else if (SpotLight3D *spot = cast_to<SpotLight3D>(light)) {
-				real_t theta = Math::deg_to_rad(spot->get_param(SpotLight3D::PARAM_SPOT_ANGLE));
-				// Convert the spot light angle to steradians, based on Wikipedia: https://en.wikipedia.org/wiki/Steradian#Other_properties
-				// "The solid angle of a spherical cone whose cross-section subtends the angle 2*theta is:"
-				real_t sin_half_theta = Math::sin(theta / 2.0);
-				emission_solid_angle = 4.0 * Math::PI * sin_half_theta * sin_half_theta;
-			}
-			// Unit: `lm = cd * sr`. Calculate the total (perceived) light power based on the per-steradian intensity and the solid angle we calculated.
-			real_t luminous_flux = luminous_intensity * emission_solid_angle;
-			// The default luminous flux of the light is 1000 lm, and "energy" is a multiplier for it, so set energy to the desired lumens divided by 1000.
+			// Unit: `lm = W * lm/W`. Convert from Blender's radiometric units to Godot's photometric units.
+			real_t luminous_flux = radiant_flux * blender_luminous_efficacy;
+			// The default luminous flux of both omni and spot lights is `1000 lm`.
+			// The energy parameter is a multiplier for it, so we set it to the desired lumens divided by `1000 lm`.
 			energy = luminous_flux / 1000.0;
 		}
 		light->set_param(Light3D::PARAM_ENERGY, energy);
