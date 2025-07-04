@@ -385,8 +385,7 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 			// The energy parameter is a multiplier for it, so we set it to the desired lumens divided by `1000 lm`.
 			energy = luminous_flux / 1000.0;
 		}
-		real_t fudge_factor = 100.0;
-		light->set_param(Light3D::PARAM_ENERGY, energy * fudge_factor);
+		light->set_param(Light3D::PARAM_ENERGY, energy);
 		light->set_param(Light3D::PARAM_ATTENUATION, 2.0);
 	}
 
