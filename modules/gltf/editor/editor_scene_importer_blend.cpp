@@ -386,6 +386,7 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 			energy = luminous_flux / 1000.0;
 		}
 		light->set_param(Light3D::PARAM_ENERGY, energy);
+		light->set_param(Light3D::PARAM_ATTENUATION, 2.0);
 	}
 
 	return scene;
