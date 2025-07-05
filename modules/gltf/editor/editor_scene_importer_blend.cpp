@@ -353,7 +353,7 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 
 		Light3D *light = cast_to<Light3D>(light_node);
 		real_t blender_watts = light->get_param(Light3D::PARAM_ENERGY);
-		real_t energy;
+
 		if (cast_to<DirectionalLight3D>(light)) {
 			// While the constant factor used in the IES parsing code is only used in Blender for point-like light sources, lacking any other point of reference,
 			// we might as well use it for directional lights as well, since at least the units kind of work out. It's all about the luminous efficacy anyhow.
@@ -363,18 +363,17 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 			// The solid angle of where the light is emitted does not make sense for directional lights. Since Blender's cd/W constant includes a factor of
 			// 4*PI steradians just to convert from W/sr to W, do the same here, in hopes of arriving at similar results:
 			real_t illuminance_lx = lx_per_steradian * (4.0 * Math::PI);
-			// The default illuminance of directional lights is `100000 lx`. The energy parameter is a multiplier for it, so we factor that out here.
-			energy = illuminance_lx / 100000.0;
+			light->set_param(Light3D::PARAM_INTENSITY, illuminance_lx);
 		} else {
 			real_t ies_luminous_intensity_cd = blender_watts * candelas_per_blender_watt;
 			// - `OmniLight3D`s shine uniformly in all directions, that is, they emit light in a solid angle of `4*PI` steradians.
 			// - The intensity value of a SpotLight3D is whatever an OmniLight3D would have, except that anything outside of the emitted cone is perfectly absorbed.
 			//   So for the purposes of its intensity parameter, the solid angle is `4*PI` steradians as well.
 			real_t luminous_flux_lm = ies_luminous_intensity_cd * (4.0 * Math::PI);
-			// The default luminous flux of both omni and spot lights is `1000 lm`. The energy parameter is a multiplier for it, so we factor that out here.
-			energy = luminous_flux_lm / 1000.0;
+			light->set_param(Light3D::PARAM_INTENSITY, luminous_flux_lm);
 		}
-		light->set_param(Light3D::PARAM_ENERGY, energy);
+		light->set_param(Light3D::PARAM_ENERGY, 1.0);
+
 		// Blender has physically based attenuation, so this is needed to get comparable lighting results.
 		light->set_param(Light3D::PARAM_ATTENUATION, 2.0);
 	}
