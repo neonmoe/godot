@@ -339,25 +339,20 @@ Node *EditorSceneFormatImporterBlend::import_scene(const String &p_path, uint32_
 	scene = gltf->generate_scene(state, (float)p_options["animation/fps"], (bool)p_options["animation/trimming"], false);
 #endif
 
-	// The lighting intensities were imported using the "RAW" lighting mode, which means that they need to be converted to Godot's units.
+	// The lights need a bit of post-processing to match Blender.
 	TypedArray<Light3D> light_nodes = scene->find_children("*", "Light3D");
 	for (Variant light_node : light_nodes) {
 		Light3D *light = cast_to<Light3D>(light_node);
-
 		// Blender has physically based attenuation, so this is needed to get comparable lighting results.
 		light->set_param(Light3D::PARAM_ATTENUATION, 2.0);
-
 		// The light's "brightness" in **watts** for point lights and spot lights, **watts / square meter** for sun lights.
 		real_t blender_light_units = light->get_param(Light3D::PARAM_ENERGY);
 		if (GLOBAL_GET_CACHED(bool, "rendering/lights_and_shadows/use_physical_light_units")) {
-			// For physical light units, the intention is to aim for the actual lumen values of the lights that Blender describes in watts.
-			// Based on Blender internally using the D65 standard illuminant as a compromise to get a "typical luminous efficacy," this
-			// code also uses that to convert from Blender's radiometric units to Godot's photometric ones. Aside from this difference,
-			// the lights are defined in the same terms between Godot (when using physical light units) and Blender, so this is the only
-			// conversion that is needed. Here is the bit in Blender's IES parsing code mentioning this particular luminous efficacy:
+			// The only difference between Blender and Godot lights (when using physical units) is that Blender uses radiometric units, and Godot uses
+			// photometric units. To convert between these, we need to know the luminous efficacy of each light. In an attempt to be consistent with
+			// Blender's own take on this conversion, we use the same luminous efficacy as Blender uses when parsing IES profiles, in the other direction.
 			// <https://github.com/blender/blender/blob/f3399a41e231dfeb5e0894b9d041588b6c92dc5c/intern/cycles/util/ies.cpp#L168-L174>
 			constexpr real_t luminous_efficacy = 177.82;
-
 			// The light's "brightness" in **lumens** for omni lights and spot lights, **lux** for directional lights.
 			real_t godot_light_units = blender_light_units * luminous_efficacy;
 			light->set_param(Light3D::PARAM_INTENSITY, godot_light_units);
